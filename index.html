@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>ASCII Rose</title>
+<style>
+/*
+VOICE: quiet, tender, a private gift
+IDEA: a living rose drawn only with coloured characters
+PICTURE: the full-screen ASCII rose itself, nothing else
+COLOUR and TYPE: absolute black; crimson, burgundy, muted green; bold monospace glyphs
+LAYOUT: one canvas filling the viewport
+*/
+:root{color-scheme:dark;--bg:#000}
+:root[data-theme=light],:root[data-theme=dark]{color-scheme:dark}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;touch-action:manipulation;-webkit-user-select:none;user-select:none}
+canvas{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;display:block;background:#000}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Анимированная роза из символов"></canvas>
+<script>
+{
+'use strict';
+// ---------------------------------------------------------------- math
+const PI = Math.PI;
+const clamp01 = x => x < 0 ? 0 : (x > 1 ? 1 : x);
+const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const lerp = (a, b, t) => a + (b - a) * t;
+function hash1(x) { x >>>= 0; x ^= x >>> 16; x = Math.imul(x, 0x7feb352d) >>> 0; x ^= x >>> 15; x = Math.imul(x, 0x846ca68b) >>> 0; x ^= x >>> 16; return x >>> 0; }
+function hash3(a, b, c) {
+  const hc = hash1((Math.imul(c, 83492791) + 0x9e3779b9) >>> 0);
+  const hb = hash1((Math.imul(b, 19349663) ^ hc) >>> 0);
+  return hash1((Math.imul(a, 73856093) ^ hb) >>> 0);
+}
+const rnd = (a, b, c) => (hash3(a, b, c) & 0xFFFFFF) / 16777216;
+const easeOut = t => { t = clamp01(t); return 1 - (1 - t) ** 3; };
+const easeSine = t => { t = clamp01(t); return 0.5 - 0.5 * Math.cos(PI * t); };
+function wrapPi(a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
+function noise1(seed, x) { const i = Math.floor(x); let f = x - i; f = f * f * (3 - 2 * f); return lerp(rnd(seed, i, 7), rnd(seed, i + 1, 7), f); }
+
+// ---------------------------------------------------------------- petals
+const K = 28, NSL = 24;
+class Petal {
+  constructor(idx, kind) {
+    this.idx = idx; this.kind = kind;
+    this.tr = new Float64Array(K + 1); this.th2 = new Float64Array(K + 1);
+    this.slY0 = new Float64Array(2 * NSL); this.slY1 = new Float64Array(2 * NSL);
+    this.slK0 = new Int32Array(2 * NSL); this.slK1 = new Int32Array(2 * NSL);
+    this.fx0 = [0, 0]; this.fx1 = [0, 0]; this.fsl = [0, 0];
+  }
+  prep() {
+    this.sinTh0 = Math.sin(this.th0); this.cosTh0 = Math.cos(this.th0);
+    for (let k = 0; k <= K; k++) { this.profile(k / K); this.tr[k] = PR; this.th2[k] = PH; }
+  }
+  profile(v) {
+    const th = this.th0 + this.curl * v;
+    if (Math.abs(this.curl) < 1e-4) { PR = this.r0 + this.L * v * this.sinTh0; PH = this.bas + this.L * v * this.cosTh0; }
+    else { PR = this.r0 + this.L * (this.cosTh0 - Math.cos(th)) / this.curl; PH = this.bas + this.L * (Math.sin(th) - this.sinTh0) / this.curl; }
+  }
+  slab(face, X, Y) {
+    if (X < this.fx0[face] || X > this.fx1[face]) return -1;
+    let k = ((X - this.fx0[face]) * this.fsl[face]) | 0; if (k >= NSL) k = NSL - 1;
+    const j = face * NSL + k;
+    return (Y < this.slY0[j] || Y > this.slY1[j]) ? -1 : j;
+  }
+  taper(v) {
+    if (this.kind === 1) return Math.pow(Math.max(0, 1 - v), 0.85) * (0.55 + 0.45 * smooth(0, 0.25, v));
+    return 0.30 + 0.70 * smooth(-0.05, 0.55, v);
+  }
+  vmax(u) {
+    if (this.kind === 1) return 1;
+    const au = Math.abs(u), u2 = u * u;
+    const pt = this.open * Math.max(0, (this.idx - 7) / 15);
+    let vm = 1 - 0.13 * u2 * u2 - 0.05 * u2 - 0.30 * pt * au * Math.sqrt(au);
+    if (au < 0.35) vm -= 0.035 * Math.exp(-u2 / 0.012) * this.open;
+    vm += this.rimWave * Math.sin(u * 5.3 + this.phase) * (0.4 + au);
+    return vm;
+  }
+}
+let PR = 0, PH = 0;
+
+// ---------------------------------------------------------------- scene
+const NP = 23, NS = 5, STEM_N = 48;
+const T_STEM0 = 2.0, T_STEM1 = 5.0, T_BUD0 = 4.4, T_BUD1 = 7.0, T_BLOOM0 = 7.0, T_BLOOM1 = 13.2, T_TEXT0 = 12.0;
+const S = {
+  petals: [], sepals: [], front: [], back: [],
+  stX: new Float64Array(STEM_N + 1), stY: new Float64Array(STEM_N + 1),
+  leafFront: [], leafBack: [],
+  thornS: [0.30, 0.47, 0.58, 0.79], thornSide: [1, -1, 1, -1]
+};
+for (let i = 0; i < NP; i++) S.petals.push(new Petal(i, 0));
+for (let i = 0; i < NS; i++) S.sepals.push(new Petal(i, 1));
+for (let i = 0; i < NS; i++) S.front.push(S.sepals[i]);
+for (let i = NP - 1; i >= 0; i--) S.front.push(S.petals[i]);
+for (let i = 0; i < NP; i++) S.back.push(S.petals[i]);
+for (let i = 0; i < NS; i++) S.back.push(S.sepals[i]);
+
+const stemHW = s => 0.0125 + 0.0055 * s;
+let SAX = 0, SAY = 0, SATX = 0, SATY = 0;
+function stemAt(s) {
+  const f = clamp01(s) * STEM_N; let k = f | 0; if (k >= STEM_N) k = STEM_N - 1; const a = f - k;
+  SAX = lerp(S.stX[k], S.stX[k + 1], a); SAY = lerp(S.stY[k], S.stY[k + 1], a);
+  let tx = S.stX[k + 1] - S.stX[k], ty = S.stY[k + 1] - S.stY[k]; const n = Math.hypot(tx, ty) + 1e-12;
+  SATX = tx / n; SATY = ty / n;
+}
+
+function update(t) {
+  S.t = t;
+  const E = 0.40; S.cE = Math.cos(E); S.sE = Math.sin(E);
+  let lx = -0.50 + 0.16 * Math.sin(t * 0.11), ly = 0.62 + 0.10 * Math.sin(t * 0.083 + 1.0), lz = 0.80;
+  let ln = Math.hypot(lx, ly, lz); S.lx = lx / ln; S.ly = ly / ln; S.lz = lz / ln;
+  let hx = S.lx, hy = S.ly, hz = S.lz + 1, hn = Math.hypot(hx, hy, hz); S.hvx = hx / hn; S.hvy = hy / hn; S.hvz = hz / hn;
+
+  S.stemGrow = easeSine((t - T_STEM0) / (T_STEM1 - T_STEM0));
+  const budT = clamp01((t - T_BUD0) / (T_BUD1 - T_BUD0));
+  const budScale = easeOut(budT);
+  const bl = easeSine((t - T_BLOOM0) / (T_BLOOM1 - T_BLOOM0));
+  const breathe = 0.018 * Math.sin(t * 0.37) * smooth(T_BLOOM1, T_BLOOM1 + 4, t);
+
+  const alive = smooth(3.0, 9.0, t);
+  S.sway = alive * (0.022 * Math.sin(t * 0.47) + 0.010 * Math.sin(t * 0.81 + 1.3) + 0.004 * Math.sin(t * 1.9));
+  S.swayY0 = -0.80; S.swayY1 = 0.30;
+  const tilt = alive * (0.05 * Math.sin(t * 0.47 - 0.6) + 0.02 * Math.sin(t * 0.73));
+  S.cosTilt = Math.cos(tilt); S.sinTilt = Math.sin(tilt);
+  S.headX = 0; S.headY = 0.34;
+  S.headS = budT <= 0 ? 0 : 0.52 * (0.12 + 0.88 * budScale);
+  S.recR = budScale;
+  const rot = t * (2 * PI / 80) + 0.6;
+
+  for (let i = 0; i < NP; i++) {
+    const p = S.petals[i], fi = i / (NP - 1), jit = rnd(i, 3, 11) - 0.5;
+    const start = (1 - fi) * 0.42 + 0.06 * jit;
+    let o = easeSine((bl - start) / 0.58);
+    o = clamp01(o * (0.42 + 0.58 * Math.pow(fi, 0.8)) + breathe * (0.5 + fi));
+    p.open = o;
+    p.az = i * 2.39996323 + rot + 0.25 * jit;
+    p.h = lerp(1.55 - 0.45 * fi, 1.30 - 0.42 * fi, o) * (1 + 0.12 * jit);
+    p.r0 = lerp(0.025 + 0.15 * fi, 0.03 + 0.17 * fi, o);
+    p.L = lerp(0.46 + 0.28 * fi, 0.58 + 0.36 * fi, o) * (1 + 0.16 * jit * o + 0.05 * jit);
+    p.th0 = lerp(0.05 + 0.42 * fi, 0.04 + 0.40 * Math.pow(fi, 1.4), o) + 0.10 * jit * o;
+    p.curl = lerp(-(0.25 + 0.95 * fi), -0.10 + 0.80 * Math.pow(fi, 1.8), o) * (1 + 0.15 * jit);
+    p.bas = lerp(-0.06 * fi, -0.10 * fi, o);
+    p.lipW = 0.03 + 0.07 * o * (0.3 + 0.7 * fi);
+    p.depth = lerp(0.30 + 0.70 * Math.pow(fi, 0.9), 0.58 + 0.42 * Math.pow(fi, 0.7), o);
+    p.rimWave = 0.012 + 0.018 * o;
+    p.phase = i * 1.7;
+    p.prep();
+  }
+  const so = easeSine((t - (T_BLOOM0 - 0.4)) / 3.6);
+  for (let i = 0; i < NS; i++) {
+    const s = S.sepals[i], jit = rnd(i, 5, 17) - 0.5;
+    s.open = so;
+    s.az = i * (2 * PI / NS) + rot + 0.3 + 0.2 * jit;
+    s.h = 0.40 + 0.06 * jit; s.r0 = 0.10; s.bas = -0.10; s.L = 0.50 + 0.08 * jit;
+    s.th0 = lerp(0.42, 1.75 + 0.15 * jit, so); s.curl = lerp(-1.05, 0.75, so);
+    s.lipW = 0; s.depth = 1; s.rimWave = 0; s.phase = i;
+    s.prep();
+  }
+  S.hbx0 = 1e9; S.hbx1 = -1e9; S.hby0 = 1e9; S.hby1 = -1e9;
+  for (const p of S.petals) bbox(p);
+  for (const p of S.sepals) bbox(p);
+  S.hbx0 = Math.min(S.hbx0, -0.2); S.hbx1 = Math.max(S.hbx1, 0.2); S.hby0 = Math.min(S.hby0, -0.3);
+
+  // stem
+  const x0 = S.headX, y0 = S.headY - 0.22 * S.headS, x3 = -0.035, y3 = -0.78;
+  const x1 = x0 + 0.02, y1 = y0 - 0.32, x2 = x3 + 0.07, y2 = y3 + 0.30;
+  S.sbx0 = 1e9; S.sbx1 = -1e9; S.sby0 = 1e9; S.sby1 = -1e9;
+  for (let k = 0; k <= STEM_N; k++) {
+    const s = k / STEM_N, a = 1 - s;
+    const X = a * a * a * x0 + 3 * a * a * s * x1 + 3 * a * s * s * x2 + s * s * s * x3;
+    const Y = a * a * a * y0 + 3 * a * a * s * y1 + 3 * a * s * s * y2 + s * s * s * y3;
+    S.stX[k] = X; S.stY[k] = Y;
+    S.sbx0 = Math.min(S.sbx0, X); S.sbx1 = Math.max(S.sbx1, X); S.sby0 = Math.min(S.sby0, Y); S.sby1 = Math.max(S.sby1, Y);
+  }
+  S.sbx0 -= 0.06; S.sbx1 += 0.06; S.sby0 -= 0.03; S.sby1 += 0.03;
+
+  S.leafFront.length = 0; S.leafBack.length = 0;
+  addLeaf(S.leafBack, 0, 0.44, -1, 152, 0.12, 0.185, 4.0, 1.0);
+  addLeaf(S.leafFront, 1, 0.64, 1, 24, 0.10, 0.165, 4.6, -1.0);
+  addLeaf(S.leafBack, 2, 0.22, 1, 48, 0.035, 0.105, 5.1, -1.0);
+  S.lbx0 = 1e9; S.lbx1 = -1e9; S.lby0 = 1e9; S.lby1 = -1e9;
+  for (const f of S.leafFront.concat(S.leafBack)) {
+    const w = (f.wid < 0 ? 0.01 : (f.wid + Math.abs(f.bend)) * f.len) + 0.01;
+    const ex = f.bx + f.dx * f.len, ey = f.by + f.dy * f.len;
+    f.x0 = Math.min(f.bx, ex) - w; f.x1 = Math.max(f.bx, ex) + w; f.y0 = Math.min(f.by, ey) - w; f.y1 = Math.max(f.by, ey) + w;
+    S.lbx0 = Math.min(S.lbx0, f.x0); S.lbx1 = Math.max(S.lbx1, f.x1); S.lby0 = Math.min(S.lby0, f.y0); S.lby1 = Math.max(S.lby1, f.y1);
+  }
+}
+
+function addLeaf(list, leafId, s, side, angDeg, rachis, tlen, t0, lightSide) {
+  const t = S.t, g = easeOut((t - t0) / 2.4);
+  if (g <= 0.001) return;
+  stemAt(s); let px = SAX, py = SAY; const tx = SATX, ty = SATY;
+  const hw = stemHW(s);
+  let nx = ty, ny = -tx; if (nx * side < 0) { nx = -nx; ny = -ny; }
+  px += nx * hw * 0.8; py += ny * hw * 0.8;
+  const unf = easeOut((t - t0 - 0.2) / 2.2);
+  const ang = (angDeg + side * (1 - unf) * 40) * PI / 180;
+  const dx = Math.cos(ang), dy = Math.sin(ang), rl = rachis * g;
+  const pet = { bx: px, by: py, dx, dy, len: rl + 0.01, wid: -1, bend: 0, id: 500 + leafId * 10 + 9, lightSide };
+  const ex = px + dx * rl, ey = py + dy * rl;
+  const bendS = 0.10 * side * (dx > 0 ? -1 : 1);
+  list.push({ bx: ex, by: ey, dx, dy, len: tlen * g, wid: 0.30 * Math.pow(unf, 0.7), bend: bendS, id: 500 + leafId * 10, lightSide });
+  if (rachis > 0.05) {
+    for (let k = -1; k <= 1; k += 2) {
+      const la = ang + k * (0.95 - 0.25 * (1 - unf));
+      list.push({ bx: px + dx * rl * 0.52, by: py + dy * rl * 0.52, dx: Math.cos(la), dy: Math.sin(la), len: tlen * 0.72 * g,
+        wid: 0.30 * Math.pow(unf, 0.7), bend: 0.08 * k, id: 500 + leafId * 10 + 2 + (k > 0 ? 2 : 0), lightSide: lightSide * k });
+    }
+  }
+  list.push(pet);
+}
+
+const NA = 40, NV = 15;
+const tmpX = new Float64Array(NA * NV), tmpY = new Float64Array(NA * NV), tmpF = new Int32Array(NA * NV), tmpV = new Int32Array(NA * NV);
+function bbox(p) {
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  const fx0 = [1e9, 1e9], fx1 = [-1e9, -1e9];
+  let n = 0;
+  const cE = S.cE, sE = S.sE;
+  for (let a = 0; a < NA; a++) {
+    const az = p.az + p.h * (2 * a / (NA - 1) - 1), sa = Math.sin(az), ca = Math.cos(az);
+    const face = ca >= 0 ? 0 : 1, nearRim = Math.abs(ca) < 0.2;
+    for (let b = 0; b < NV; b++) {
+      const kk = Math.round(b / (NV - 1) * K);
+      const r = p.tr[kk], hg = p.th2[kk];
+      const X = r * sa, Y = hg * cE - r * ca * sE;
+      tmpX[n] = X; tmpY[n] = Y; tmpF[n] = nearRim ? 2 : face; tmpV[n] = b; n++;
+      if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
+      for (let f = 0; f < 2; f++) if (face === f || nearRim) { if (X < fx0[f]) fx0[f] = X; if (X > fx1[f]) fx1[f] = X; }
+    }
+  }
+  const mg = 0.05;
+  for (let f = 0; f < 2; f++) {
+    let a0 = fx0[f] - mg, a1 = fx1[f] + mg;
+    if (a1 < a0) { a0 = 1e9; a1 = -1e9; }
+    p.fx0[f] = a0; p.fx1[f] = a1; p.fsl[f] = NSL / Math.max(1e-6, a1 - a0);
+    for (let k = 0; k < NSL; k++) { const j = f * NSL + k; p.slY0[j] = 1e9; p.slY1[j] = -1e9; p.slK0[j] = K; p.slK1[j] = 0; }
+  }
+  for (let i = 0; i < n; i++) {
+    for (let f = 0; f < 2; f++) {
+      if (tmpF[i] !== 2 && tmpF[i] !== f) continue;
+      if (p.fx1[f] < p.fx0[f]) continue;
+      const kf = (tmpX[i] - p.fx0[f]) * p.fsl[f];
+      let k0 = Math.floor(kf - mg * p.fsl[f] - 1), k1 = Math.floor(kf + mg * p.fsl[f] + 1);
+      if (k0 < 0) k0 = 0; if (k1 >= NSL) k1 = NSL - 1;
+      const kv = (tmpV[i] * K / (NV - 1)) | 0;
+      for (let k = k0; k <= k1; k++) {
+        const j = f * NSL + k;
+        if (tmpY[i] - mg < p.slY0[j]) p.slY0[j] = tmpY[i] - mg;
+        if (tmpY[i] + mg > p.slY1[j]) p.slY1[j] = tmpY[i] + mg;
+        if (kv - 3 < p.slK0[j]) p.slK0[j] = Math.max(1, kv - 3);
+        if (kv + 3 > p.slK1[j]) p.slK1[j] = Math.min(K, kv + 3);
+      }
+    }
+  }
+  p.bx0 = x0 - 0.05; p.bx1 = x1 + 0.05; p.by0 = y0 - 0.05; p.by1 = y1 + 0.05;
+  if (p.bx0 < S.hbx0) S.hbx0 = p.bx0; if (p.bx1 > S.hbx1) S.hbx1 = p.bx1;
+  if (p.by0 < S.hby0) S.hby0 = p.by0; if (p.by1 > S.hby1) S.hby1 = p.by1;
+}
+
+// solver output
+let SV_v = 0, SV_az = 0;
+function solve(p, X, Y, front, k0, k1) {
+  const cE = S.cE, sE = S.sE, sg = front ? 1 : -1, X2 = X * X, tr = p.tr, th2 = p.th2;
+  let v = -1, az = 0, bestDepth = -1e9;
+  let pr = tr[k0 - 1], pd = pr * pr - X2, pz = pd < 0 ? 0 : sg * Math.sqrt(pd), ph = th2[k0 - 1];
+  let pf = ph * cE - pz * sE - Y;
+  for (let k = k0; k <= k1; k++) {
+    const rb = tr[k], db = rb * rb - X2, hb0 = th2[k];
+    const zb0 = db < 0 ? 0 : sg * Math.sqrt(db);
+    const fb0 = hb0 * cE - zb0 * sE - Y;
+    const ra = pr, da = pd, za0 = pz, ha0 = ph, fa0 = pf;
+    pr = rb; pd = db; pz = zb0; ph = hb0; pf = fb0;
+    if (da < 0 && db < 0) continue;
+    let a0 = 0, a1 = 1, ha = ha0, hb = hb0, za = za0, zb = zb0, fa = fa0, fb = fb0;
+    if (da < 0 || db < 0) {
+      if (da < 0) { a0 = da / (da - db); ha = ha0 + (hb0 - ha0) * a0; za = 0; fa = ha * cE - Y; }
+      else { a1 = da / (da - db); hb = ha0 + (hb0 - ha0) * a1; zb = 0; fb = hb * cE - Y; }
+    }
+    if ((fa <= 0) === (fb <= 0)) continue;
+    const a = fa / (fa - fb);
+    const zz = za + (zb - za) * a, hh = ha + (hb - ha) * a;
+    const depth = hh * sE + zz * cE;
+    if (depth <= bestDepth) continue;
+    const fr = a0 + (a1 - a0) * a;
+    const vc = (k - 1 + fr) / K;
+    const rr = ra + (rb - ra) * fr;
+    let s = rr > 1e-6 ? X / rr : 0; if (s > 1) s = 1; else if (s < -1) s = -1;
+    const as0 = Math.asin(s);
+    const azc = front ? as0 : (as0 >= 0 ? PI - as0 : -PI - as0);
+    const uc = wrapPi(azc - p.az) / p.h;
+    if (Math.abs(uc) <= p.taper(vc) && (vc < 0.4 || vc <= p.vmax(uc))) { bestDepth = depth; v = vc; az = azc; }
+  }
+  if (v < 0) return false;
+  SV_v = v; SV_az = az; return true;
+}
+
+// colours
+const PK = [0.00, 0.10, 0.28, 0.50, 0.70, 0.86, 1.00, 1.20];
+const PC = [[0, 0, 0], [0.15, 0, 0.018], [0.38, 0.004, 0.040], [0.66, 0.020, 0.065], [0.86, 0.070, 0.090], [0.98, 0.200, 0.170], [1, 0.420, 0.340], [1, 0.700, 0.600]];
+const GK = [0.00, 0.15, 0.40, 0.70, 1.00, 1.20];
+const GC = [[0, 0, 0], [0.020, 0.070, 0.030], [0.070, 0.220, 0.075], [0.200, 0.420, 0.150], [0.420, 0.620, 0.280], [0.62, 0.78, 0.42]];
+let CR = 0, CG = 0, CB = 0;
+function ramp(k, c, l) {
+  if (l <= k[0]) { CR = c[0][0]; CG = c[0][1]; CB = c[0][2]; return; }
+  for (let i = 1; i < k.length; i++) {
+    if (l <= k[i]) { const a = (l - k[i - 1]) / (k[i] - k[i - 1]); CR = lerp(c[i - 1][0], c[i][0], a); CG = lerp(c[i - 1][1], c[i][1], a); CB = lerp(c[i - 1][2], c[i][2], a); return; }
+  }
+  const n = c.length - 1; CR = c[n][0]; CG = c[n][1]; CB = c[n][2];
+}
+
+// field output
+let EL = 0, ER = 0, EG = 0, EB = 0, EID = -1, ERANK = 1000;
+function shadePetal(p, X, Y, front, k0, k1) {
+  if (!solve(p, X, Y, front, k0, k1)) return false;
+  const v = SV_v, az = SV_az, th = p.th0 + p.curl * v;
+  const rel = wrapPi(az - p.az), u = rel / p.h;
+  const tp = p.taper(v);
+  if (Math.abs(u) > tp) return false;
+  const vmax = p.vmax(u);
+  if (v > vmax) return false;
+  const cE = S.cE, sE = S.sE;
+  const ct = Math.cos(th), st = Math.sin(th), sa = Math.sin(az), ca = Math.cos(az);
+  const wx = ct * sa, wy = -st, wz = ct * ca;
+  let nx = wx, ny = wy * cE - wz * sE, nz = wy * sE + wz * cE, inner = false;
+  if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; inner = true; }
+  if (p.kind === 1) {
+    const dif = nx * S.lx + ny * S.ly + nz * S.lz;
+    const lam = clamp01((dif + 0.3) / 1.3);
+    const ao = lerp(0.35, 1, smooth(0, 0.5, v)) * (inner ? 0.75 : 1);
+    let l = (0.10 + 0.75 * lam) * ao;
+    const edge = Math.abs(u) / Math.max(1e-3, tp);
+    l *= 0.85 + 0.15 * (1 - edge * edge);
+    EL = l; ramp(GK, GC, l); ER = CR; EG = CG; EB = CB;
+    EID = 200 + p.idx * 2 + (front ? 0 : 1);
+    return true;
+  }
+  const difP = nx * S.lx + ny * S.ly + nz * S.lz;
+  const lamP = clamp01((difP + 0.35) / 1.35);
+  const trans = difP < 0 ? -difP * 0.22 : 0;
+  const spec = Math.pow(Math.max(0, nx * S.hvx + ny * S.hvy + nz * S.hvz), 14) * 0.30;
+  let aoV = inner ? lerp(0.12, 1, smooth(-0.05, 0.62, v)) : lerp(0.45, 1, smooth(-0.05, 0.45, v));
+  if (inner) aoV *= lerp(0.50, 1, smooth(0.10, 0.95, v));
+  let l2 = (0.12 + 0.88 * lamP + trans) * aoV * p.depth * 1.12 + spec * aoV;
+  const lip = v > vmax - p.lipW;
+  if (lip) {
+    const q = (v - (vmax - p.lipW)) / Math.max(1e-3, p.lipW);
+    l2 = l2 * 0.75 + (0.20 + 0.28 * lamP) * (0.6 + 0.4 * p.depth) * (0.7 + 0.3 * Math.sin(q * PI));
+  } else if (v > vmax - p.lipW - 0.10) {
+    const q = (v - (vmax - p.lipW - 0.10)) / 0.10;
+    l2 *= 1 - 0.55 * Math.sin(q * PI * 0.5) * smooth(0.05, 0.3, p.open + 0.1);
+  }
+  const ue = Math.abs(u) / Math.max(1e-3, tp);
+  l2 *= 1 - 0.30 * Math.pow(ue, 6);
+  l2 *= 0.92 + 0.08 * Math.sin(rel * 46 + v * 5 + p.idx * 2.1);
+  EL = l2; ramp(PK, PC, l2); ER = CR; EG = CG; EB = CB;
+  if (inner) { EG *= 0.85; EB *= 1.05; }
+  EID = p.idx * 4 + (front ? 0 : 2) + (lip ? 1 : 0);
+  return true;
+}
+
+function shadeStem(x, y) {
+  let best = 1e9, bs = 0, bq = 0, btx = 0, bty = 1;
+  for (let k = 0; k < STEM_N; k++) {
+    const ax = S.stX[k], ay = S.stY[k], bx = S.stX[k + 1], by = S.stY[k + 1];
+    if (y > Math.max(ay, by) + 0.08 || y < Math.min(ay, by) - 0.08) continue;
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let a = ((x - ax) * dx + (y - ay) * dy) / l2; if (a < 0) a = 0; else if (a > 1) a = 1;
+    const px = ax + dx * a - x, py = ay + dy * a - y, d = px * px + py * py;
+    if (d < best) { best = d; bs = (k + a) / STEM_N; const ln = Math.sqrt(l2); btx = dx / ln; bty = dy / ln; bq = (-(x - ax) * bty + (y - ay) * btx); }
+  }
+  const dist = Math.sqrt(best), hw = stemHW(bs);
+  if (bs < 1 - S.stemGrow) return false;
+  for (let i = 0; i < S.thornS.length; i++) {
+    if (bs < 1 - S.stemGrow + 0.02) break;
+    stemAt(S.thornS[i]);
+    let nx = -SATY, ny = SATX; if (S.thornSide[i] < 0) { nx = -nx; ny = -ny; }
+    const rx = x - SAX, ry = y - SAY;
+    const along = rx * SATX + ry * SATY, out = rx * nx + ry * ny;
+    const d = (out - hw * 0.6) / 0.034;
+    if (d > 0 && d < 1) {
+      const centre = -0.010 * d * d, half = 0.017 * (1 - d);
+      if (Math.abs(along - centre) < half) {
+        const side = (along - centre) / half;
+        const l = 0.30 + 0.30 * (side * -0.5 + 0.5) + 0.25 * (1 - d);
+        EL = l; ER = 0.45 * l + 0.05; EG = 0.10 * l + 0.02; EB = 0.05 * l; EID = 330 + i; return true;
+      }
+    }
+  }
+  if (dist > hw) return false;
+  let q = bq / hw; if (q > 1) q = 1; if (q < -1) q = -1;
+  const nxs = q * (-bty), nys = q * btx, nzs = Math.sqrt(Math.max(0, 1 - q * q));
+  const dif = nxs * S.lx + nys * S.ly + nzs * S.lz;
+  let l3 = 0.10 + 0.72 * clamp01((dif + 0.25) / 1.25);
+  l3 *= 0.93 + 0.07 * Math.sin(bs * 180);
+  l3 *= lerp(0.55, 1, smooth(0, 0.12, bs));
+  EL = l3; ramp(GK, GC, l3); ER = CR + smooth(0.25, 0, bs) * 0.35 * 0.25 * l3; EG = CG; EB = CB;
+  EID = 310; return true;
+}
+
+function shadeLeaf(f, x, y) {
+  if (x < f.x0 || x > f.x1 || y < f.y0 || y > f.y1 || f.len <= 1e-4) return false;
+  const rx = x - f.bx, ry = y - f.by;
+  const s = (rx * f.dx + ry * f.dy) / f.len;
+  if (s < 0 || s > 1) return false;
+  let tt = (-rx * f.dy + ry * f.dx) / f.len;
+  tt -= f.bend * s * s;
+  if (f.wid < 0) {
+    const hw0 = 0.0055 / f.len;
+    if (Math.abs(tt) > hw0) return false;
+    const l = 0.22 + 0.25 * (1 - Math.abs(tt) / hw0);
+    EL = l; ramp(GK, GC, l); ER = CR; EG = CG; EB = CB; EID = f.id; return true;
+  }
+  let hw = f.wid * Math.pow(Math.sin(PI * Math.pow(s, 0.85)), 0.85);
+  const saw = s * 13 + (tt > 0 ? 0 : 0.5);
+  hw *= 1 - 0.10 * (saw - Math.floor(saw)) * smooth(0.05, 0.25, s);
+  if (Math.abs(tt) > hw) return false;
+  const side = tt > 0 ? 1 : -1;
+  const a = Math.abs(tt) / Math.max(1e-4, hw);
+  let lit = 0.30 + 0.45 * (side * f.lightSide > 0 ? 1 : 0.62);
+  lit *= 0.80 + 0.20 * (1 - a * a);
+  const vv = (s * 0.95 - Math.abs(tt) * 1.5) * 7, fv = vv - Math.floor(vv);
+  lit *= 0.82 + 0.18 * smooth(0, 0.25, fv);
+  if (Math.abs(tt) < 0.012) lit *= 1.12;
+  lit *= lerp(0.6, 1, smooth(0, 0.3, s));
+  lit *= 0.9 + 0.1 * Math.sin(S.t * 0.6 + f.id);
+  EL = lit; ramp(GK, GC, lit); ER = CR; EG = CG; EB = CB;
+  EID = f.id * 2 + (side > 0 ? 1 : 0);
+  return true;
+}
+
+function evalField(sx, sy) {
+  const fy = clamp01((sy - S.swayY0) / (S.swayY1 - S.swayY0));
+  const x = sx - S.sway * fy * fy, y = sy;
+  if (S.headS > 1e-4) {
+    const hx0 = (x - S.headX) / S.headS, hy0 = (y - S.headY) / S.headS;
+    const X = hx0 * S.cosTilt + hy0 * S.sinTilt, Y = -hx0 * S.sinTilt + hy0 * S.cosTilt;
+    if (X > S.hbx0 && X < S.hbx1 && Y > S.hby0 && Y < S.hby1) {
+      let rk = 0;
+      const fo = S.front;
+      for (let k = 0; k < fo.length; k++, rk++) {
+        const p = fo[k], j = p.slab(0, X, Y); if (j < 0) continue;
+        if (shadePetal(p, X, Y, true, p.slK0[j], p.slK1[j])) { ERANK = rk; return true; }
+      }
+      const ex = X / 0.15, ey = (Y + 0.15) / 0.12, d2 = ex * ex + ey * ey;
+      if (d2 < 1 && S.recR > 0.01) {
+        const nz = Math.sqrt(1 - d2), dif = Math.max(0, ex * S.lx + ey * S.ly + nz * S.lz), l = 0.18 + 0.62 * dif;
+        EL = l; ramp(GK, GC, l); ER = CR; EG = CG; EB = CB; EID = 300; ERANK = rk; return true;
+      }
+      rk++;
+      const bo = S.back;
+      for (let k = 0; k < bo.length; k++, rk++) {
+        const p = bo[k], j = p.slab(1, X, Y); if (j < 0) continue;
+        if (shadePetal(p, X, Y, false, p.slK0[j], p.slK1[j])) { ERANK = rk; return true; }
+      }
+    }
+  }
+  const inLeaves = x > S.lbx0 && x < S.lbx1 && y > S.lby0 && y < S.lby1;
+  const inStem = x > S.sbx0 && x < S.sbx1 && y > S.sby0 && y < S.sby1;
+  if (!inLeaves && !inStem) return false;
+  for (const f of S.leafFront) if (shadeLeaf(f, x, y)) { ERANK = 200; return true; }
+  if (inStem && S.stemGrow > 0 && shadeStem(x, y)) { ERANK = 210; return true; }
+  for (const f of S.leafBack) if (shadeLeaf(f, x, y)) { ERANK = 220; return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------- renderer
+const CAPTION = 'Хотел подарить цветы, но я немного ебанутый';
+const CAPTION_LINES = ['Хотел подарить цветы,', 'но я немного ебанутый'];
+const RAMP = '.:-~ricszxvunoaejJCLYTUZXQOKHAEDPRBNMW8';
+const SHAPES = "|/\\()_-',.`:;LJ7";
+const SX = 2, SY = 4, SVN = SX * SY;
+const FONT = '"Consolas","Menlo","SF Mono","DejaVu Sans Mono","Liberation Mono","Roboto Mono","Courier New",monospace';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const R = { W: 0, H: 0, quality: 1 };
+let glyphChars, gIndex, atlas, rampList, rampLut, matchGlyph, matchVec;
+let cols, rows, cw, ch, offX, offY, unit, sw, sh;
+let sLum, sR, sG, sB, sSh, sId, sRank, birth, img, pix;
+let frameNo = 0, fullNext = true;
+
+function buildAtlas() {
+  const set = new Set((RAMP + SHAPES + CAPTION + ' ').split(''));
+  glyphChars = Array.from(set);
+  gIndex = new Map(); glyphChars.forEach((c, i) => gIndex.set(c, i));
+  const oc = document.createElement('canvas'), g = oc.getContext('2d', { willReadFrequently: true });
+  const font = 'bold ' + ch + 'px ' + FONT;
+  g.font = font;
+  cw = Math.max(4, Math.round(g.measureText('MMMMMMMMMM').width / 10));
+  const n = glyphChars.length;
+  oc.width = cw * n; oc.height = ch;
+  g.fillStyle = '#000'; g.fillRect(0, 0, oc.width, oc.height);
+  g.font = font; g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.textAlign = 'left';
+  for (let i = 0; i < n; i++) {
+    g.save(); g.beginPath(); g.rect(i * cw, 0, cw, ch); g.clip();
+    g.fillText(glyphChars[i], i * cw, ch * 0.5 + ch * 0.04);
+    g.restore();
+  }
+  const data = g.getImageData(0, 0, oc.width, oc.height).data;
+  atlas = new Uint8Array(n * cw * ch);
+  for (let i = 0; i < n; i++)
+    for (let y = 0; y < ch; y++)
+      for (let x = 0; x < cw; x++) {
+        const v = data[(y * oc.width + i * cw + x) * 4];
+        atlas[(i * ch + y) * cw + x] = Math.min(255, Math.round(Math.pow(v / 255, 0.65) * 255));
+      }
+  const dens = RAMP.split('').map(c => { const gi = gIndex.get(c); let s = 0; for (let k = 0; k < cw * ch; k++) s += atlas[gi * cw * ch + k]; return [s, gi]; });
+  dens.sort((a, b) => a[0] - b[0]);
+  rampList = dens.map(d => d[1]);
+  rampLut = new Int32Array(256);
+  const dmin = dens[0][0], dmax = dens[dens.length - 1][0];
+  for (let i = 0; i < 256; i++) {
+    const target = dmin + (dmax - dmin) * i / 255;
+    let best = 0, bd = 1e18;
+    for (let k = 0; k < dens.length; k++) { const d = Math.abs(dens[k][0] - target); if (d < bd) { bd = d; best = k; } }
+    rampLut[i] = dens[best][1];
+  }
+  matchGlyph = Array.from(new Set(SHAPES.split('').map(c => gIndex.get(c))));
+  matchVec = new Float64Array(matchGlyph.length * SVN);
+  let gmax = 1e-9;
+  for (let m = 0; m < matchGlyph.length; m++) {
+    const gi = matchGlyph[m];
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const rx = Math.min(SX - 1, (x * SX / cw) | 0), ry = Math.min(SY - 1, (y * SY / ch) | 0);
+      matchVec[m * SVN + ry * SX + rx] += atlas[(gi * ch + y) * cw + x];
+    }
+    for (let k = 0; k < SVN; k++) {
+      const ry = (k / SX) | 0, rx = k % SX;
+      const x0 = Math.ceil(rx * cw / SX), x1 = Math.ceil((rx + 1) * cw / SX), y0 = Math.ceil(ry * ch / SY), y1 = Math.ceil((ry + 1) * ch / SY);
+      matchVec[m * SVN + k] /= 255 * Math.max(1, (x1 - x0) * (y1 - y0));
+      gmax = Math.max(gmax, matchVec[m * SVN + k]);
+    }
+  }
+  for (let k = 0; k < matchVec.length; k++) matchVec[k] /= gmax;
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = Math.max(64, Math.round(canvas.clientWidth * dpr)), H = Math.max(64, Math.round(canvas.clientHeight * dpr));
+  if (W === R.W && H === R.H && pix) return;
+  R.W = W; R.H = H; canvas.width = W; canvas.height = H;
+  // character size: dense, but bounded so a large screen stays smooth in a browser
+  const portrait = H > W;
+  ch = Math.round(H / (portrait ? 124 : 88) * R.quality);
+  ch = Math.max(Math.round(7 * dpr), ch);
+  buildAtlas();
+  cols = Math.floor(W / cw); rows = Math.floor(H / ch);
+  while (cols * rows > 26000) { ch++; buildAtlas(); cols = Math.floor(W / cw); rows = Math.floor(H / ch); }
+  offX = ((W - cols * cw) / 2) | 0; offY = ((H - rows * ch) / 2) | 0;
+  sw = cols * SX; sh = rows * SY;
+  const n = sw * sh;
+  sLum = new Float32Array(n); sR = new Float32Array(n); sG = new Float32Array(n); sB = new Float32Array(n); sSh = new Float32Array(n);
+  sId = new Int32Array(n); sRank = new Int32Array(n);
+  birth = new Float32Array(cols * rows).fill(-1);
+  unit = Math.min(H / 1.86, W / 1.15);
+  img = ctx.createImageData(W, H); pix = new Uint32Array(img.data.buffer);
+  fullNext = true; quietBirth = true;
+}
+let quietBirth = false;
+
+function farther(j, pid, rk) { const o = sId[j]; if (o < 0 || o >= 200) return false; return (o >> 2) !== pid && sRank[j] > rk; }
+function isRim(x, y) {
+  if (x < 0 || y < 1 || x >= sw || y >= sh) return false;
+  const i = y * sw + x, id = sId[i];
+  if (id < 0 || id >= 200) return false;
+  const rk = sRank[i], pid = id >> 2;
+  if (farther(i - sw, pid, rk)) return true;
+  if (x > 0 && farther(i - 1, pid, rk)) return true;
+  if (x < sw - 1 && farther(i + 1, pid, rk)) return true;
+  return false;
+}
+
+const tv = new Float64Array(SVN);
+function render(t) {
+  update(t);
+  const W = R.W, H = R.H;
+  frameNo++;
+  const parity = frameNo & 1, full = fullNext; fullNext = false;
+  // 1. field (interlaced)
+  for (let sy = 0; sy < sh; sy++) {
+    if (!full && (sy & 1) !== parity) continue;
+    const Y = (H * 0.5 - (offY + (sy + 0.5) * ch / SY)) / unit;
+    let i = sy * sw;
+    for (let sx = 0; sx < sw; sx++, i++) {
+      const X = (offX + (sx + 0.5) * cw / SX - W * 0.5) / unit;
+      if (evalField(X, Y)) { sLum[i] = EL; sR[i] = ER; sG[i] = EG; sB[i] = EB; sId[i] = EID; sRank[i] = ERANK; }
+      else { sLum[i] = 0; sR[i] = 0; sG[i] = 0; sB[i] = 0; sId[i] = -1; sRank[i] = 1000; }
+    }
+  }
+  // 2. contact shading
+  for (let sy = 0; sy < sh; sy++) {
+    for (let sx = 0, i = sy * sw; sx < sw; sx++, i++) {
+      sSh[i] = 1;
+      const id = sId[i]; if (id < 0 || id >= 200) continue;
+      const rk = sRank[i];
+      for (let k = 1; k <= 3; k++) {
+        const yy = sy + k; if (yy >= sh) break;
+        const j = yy * sw + sx, o = sId[j];
+        if (o >= 0 && o < 200 && sRank[j] < rk && (o >> 2) !== (id >> 2)) { sSh[i] = (id & 2) ? 0.45 + 0.17 * (k - 1) : 0.72 + 0.09 * (k - 1); break; }
+      }
+    }
+  }
+  // 3. cells -> glyphs
+  pix.fill(0xFF000000);
+  const tf = Math.floor(t * 14);
+  const introSpark = smooth(0.5, 2.2, t) * (1 - smooth(5.0, 9.0, t));
+  const lines = cols >= CAPTION.length + 4 ? [CAPTION] : CAPTION_LINES;
+  let capRow = Math.round(((H * 0.5 + 0.875 * unit) - offY) / ch);
+  if (capRow > rows - 1 - lines.length) capRow = rows - 1 - lines.length;
+  const nMatch = matchGlyph.length;
+  // after a resize (rotation, address bar) the rose just stays; only the first build materialises
+  const quiet = quietBirth && t > 3; quietBirth = false;
+
+  for (let cy = 0; cy < rows; cy++) {
+    for (let cx = 0; cx < cols; cx++) {
+      const ci = cy * cols + cx;
+      let sumL = 0, r = 0, g = 0, b = 0, cov = 0;
+      for (let k = 0; k < SVN; k++) {
+        const si = (cy * SY + ((k / SX) | 0)) * sw + cx * SX + (k % SX);
+        if (sId[si] >= 0) { const s2 = sSh[si]; cov++; sumL += sLum[si] * s2; r += sR[si] * s2; g += sG[si] * s2; b += sB[si] * s2; }
+      }
+      let glyph = -1, lum = 0;
+      if (cov > 0 && sumL / SVN > 0.012) {
+        if (birth[ci] < 0) birth[ci] = quiet ? t - 1 : t;
+        lum = sumL / cov; r /= cov; g /= cov; b /= cov;
+        const fl = 0.90 + 0.16 * noise1(ci, t * 0.9 + ci * 0.37);
+        let mx = 0, mn = 1e9, mean = 0;
+        for (let k = 0; k < SVN; k++) {
+          const si = (cy * SY + ((k / SX) | 0)) * sw + cx * SX + (k % SX);
+          const l = sId[si] >= 0 ? Math.pow(Math.min(1, sLum[si] * sSh[si] * fl), 0.6) : 0;
+          tv[k] = l; mean += l; if (l > mx) mx = l; if (l < mn) mn = l;
+        }
+        mean /= SVN;
+        // petal contours
+        let rimHere = 0;
+        for (let k = 0; k < SVN; k++) if (isRim(cx * SX + (k % SX), cy * SY + ((k / SX) | 0))) rimHere++;
+        if (rimHere > 0 && mean > 0.25) {
+          let n0 = 0, mxs = 0, mys = 0, sxx = 0, syy = 0, sxy = 0;
+          for (let yy = cy * SY - SY; yy < cy * SY + 2 * SY; yy++)
+            for (let xx = cx * SX - 2 * SX; xx < cx * SX + 3 * SX; xx++) {
+              if (!isRim(xx, yy)) continue;
+              const px = xx * cw / SX, py = yy * ch / SY;
+              n0++; mxs += px; mys += py; sxx += px * px; syy += py * py; sxy += px * py;
+            }
+          if (n0 >= 3) {
+            mxs /= n0; mys /= n0;
+            const cxx = sxx / n0 - mxs * mxs, cyy = syy / n0 - mys * mys, cxy = sxy / n0 - mxs * mys;
+            let ang = 0.5 * Math.atan2(2 * cxy, cxx - cyy) * 180 / PI; if (ang < 0) ang += 180;
+            let rc;
+            if (ang < 20 || ang >= 160) rc = (rimHere > 1 && rnd(cx, cy, 31) < 0.5) ? '_' : '-';
+            else if (ang < 70) rc = '\\';
+            else if (ang < 110) rc = (cx * SX + SX / 2 > mxs * SX / cw) ? '(' : ')';
+            else rc = '/';
+            glyph = gIndex.get(rc);
+            lum = Math.min(1.3, lum * 1.15 + 0.08);
+          }
+        }
+        if (glyph < 0 && mx - mn > 0.40 && mean < 0.80) {
+          let tn = 0; for (let k = 0; k < SVN; k++) { tv[k] -= mean; tn += tv[k] * tv[k]; }
+          tn = Math.sqrt(tn) + 1e-9;
+          let best = -1e9, bm = 0;
+          for (let m = 0; m < nMatch; m++) {
+            const o = m * SVN; let gm = 0, gn = 0, dot = 0;
+            for (let k = 0; k < SVN; k++) gm += matchVec[o + k];
+            gm /= SVN;
+            for (let k = 0; k < SVN; k++) { const gv = matchVec[o + k] - gm; dot += gv * tv[k]; gn += gv * gv; }
+            const sc = dot / (Math.sqrt(gn) + 1e-9) / tn;
+            if (sc > best) { best = sc; bm = m; }
+          }
+          glyph = best > 0.55 ? matchGlyph[bm] : -1;
+        }
+        if (glyph < 0) {
+          const d = (mean < 0.22 ? mean / 0.22 * 0.50 : 0.50 + 0.50 * (mean - 0.22) / 0.78) + (rnd(cx, cy, 1) - 0.5) * 0.07;
+          glyph = rampLut[(clamp01(d) * 255) | 0];
+        }
+        if (rnd(ci, tf, 3) < 0.006) glyph = rampList[4 + ((rnd(ci, tf, 4) * (rampList.length - 4)) | 0)];
+        const age = t - birth[ci];
+        if (age < 0.6) {
+          const a = age / 0.6;
+          if (rnd(ci, tf, 9) > a * a) glyph = rampList[8 + ((rnd(ci, tf, 5) * (rampList.length - 9)) | 0)];
+          const flash = (1 - a) * 0.6;
+          r += (1 - r) * flash * 0.5; g += (0.55 - g) * flash * 0.4; b += (0.5 - b) * flash * 0.4;
+        }
+        const cm = Math.max(r, g, b);
+        const target = 0.22 + 0.85 * Math.pow(clamp01(lum * fl), 0.6);
+        let kk = cm > 1e-4 ? target / cm : 0; if (kk > 3.5) kk = 3.5;
+        r *= kk; g *= kk; b *= kk;
+        const hl = smooth(0.92, 1.25, lum);
+        r += (1 - r) * hl * 0.45; g += (0.85 - g) * hl * 0.45; b += (0.8 - b) * hl * 0.45;
+      } else {
+        birth[ci] = -1;
+        if (introSpark > 0) {
+          const X = (offX + (cx + 0.5) * cw - W * 0.5) / unit, Y = (H * 0.5 - (offY + (cy + 0.5) * ch)) / unit;
+          const dh = Math.sqrt(X * X + (Y - 0.36) * (Y - 0.36) * 1.4);
+          const ds = Math.abs(X + 0.02) + Math.max(0, Y - 0.25);
+          const near = Math.max(Math.exp(-dh * dh / 0.25), Math.exp(-ds * ds / 0.03) * (Y < 0.3 && Y > -0.85 ? 1 : 0));
+          const p = introSpark * (0.006 + 0.05 * near);
+          const ph = t * 7 + rnd(cx, cy, 2) * 7, slot = Math.floor(ph);
+          if (rnd(ci, slot, 6) < p) {
+            const a = Math.sin(PI * (ph - slot));
+            glyph = rampList[10 + ((rnd(ci, slot, 8) * (rampList.length - 11)) | 0)];
+            const c = (0.25 + 0.55 * near) * a * (0.6 + 0.4 * rnd(ci, slot, 12));
+            if (rnd(ci, slot, 13) < 0.25) { r = c * 0.25; g = c * 0.55; b = c * 0.25; } else { r = c; g = c * 0.10; b = c * 0.14; }
+          }
+        }
+      }
+      // caption
+      const li = cy - capRow;
+      if (li >= 0 && li < lines.length && t > T_TEXT0) {
+        const line = lines[li], k = cx - (((cols - line.length) / 2) | 0);
+        if (k >= 0 && k < line.length && line[k] !== ' ') {
+          const kg = k + (li > 0 ? lines[0].length + 1 : 0);
+          const a = (t - (T_TEXT0 + kg * 0.06 + rnd(kg, 1, 99) * 0.35)) / 0.9;
+          if (a > 0) {
+            const v = smooth(0, 1, a) * (0.88 + 0.12 * Math.sin(t * 0.6 + kg * 0.15));
+            glyph = a < 0.55 && rnd(kg, tf, 77) > a * 1.6 ? rampList[12 + ((rnd(kg, tf, 78) * (rampList.length - 13)) | 0)] : gIndex.get(line[k]);
+            r = 0.92 * v; g = 0.62 * v; b = 0.60 * v;
+          }
+        }
+      }
+      if (glyph < 0 || glyph === undefined || glyphChars[glyph] === ' ') continue;
+      const Rr = (clamp01(r) * 255) | 0, Gg = (clamp01(g) * 255) | 0, Bb = (clamp01(b) * 255) | 0;
+      if ((Rr | Gg | Bb) === 0) continue;
+      const baseX = offX + cx * cw, baseY = offY + cy * ch, ga = glyph * cw * ch;
+      for (let yy = 0; yy < ch; yy++) {
+        const prow = (baseY + yy) * W + baseX, arow = ga + yy * cw;
+        for (let xx = 0; xx < cw; xx++) {
+          const a = atlas[arow + xx];
+          if (a === 0) continue;
+          pix[prow + xx] = 0xFF000000 | (((Bb * a / 255) | 0) << 16) | (((Gg * a / 255) | 0) << 8) | ((Rr * a / 255) | 0);
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ---------------------------------------------------------------- loop
+let t0 = null, last = 0, slowFrames = 0, timeShown = 0;
+window.__rose = { seek: s => { t0 = performance.now() - s * 1000; } };
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (t0 === null) t0 = now;
+  if (now - last < 14) return;        // about 60 fps, even on 120 Hz screens
+  last = now;
+  resize();
+  const s0 = performance.now();
+  render((now - t0) / 1000);
+  const ms = performance.now() - s0;
+  window.__rose.ms = (window.__rose.ms || ms) * 0.9 + ms * 0.1; window.__rose.grid = cols + 'x' + rows + ' ch' + ch + ' q' + R.quality.toFixed(2);
+  // a slow device gets slightly larger characters rather than a stutter
+  slowFrames = ms > 24 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
+  if (slowFrames > 40 && R.quality < 1.6) { R.quality *= 1.12; R.W = 0; slowFrames = 0; }
+}
+requestAnimationFrame(frame);
+window.addEventListener('resize', () => { R.W = 0; });
+canvas.addEventListener('click', () => {
+  try {
+    const d = document, el = d.documentElement;
+    if (!d.fullscreenElement && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    else if (d.fullscreenElement && d.exitFullscreen) d.exitFullscreen().catch(() => {});
+  } catch (e) {}
+  try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+});
+}
+</script>
+</body>
+</html>
