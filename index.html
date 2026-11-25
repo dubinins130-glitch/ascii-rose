@@ -9,7 +9,7 @@
 /*
 VOICE: quiet, tender, a private gift
 IDEA: a living rose drawn only with coloured characters
-PICTURE: the full-screen ASCII rose itself, nothing else
+PICTURE: the full-screen ASCII rose with a short caption
 COLOUR and TYPE: absolute black; crimson, burgundy, muted green; bold monospace glyphs
 LAYOUT: one canvas filling the viewport
 */
@@ -17,10 +17,31 @@ LAYOUT: one canvas filling the viewport
 :root[data-theme=light],:root[data-theme=dark]{color-scheme:dark}
 html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;touch-action:manipulation;-webkit-user-select:none;user-select:none}
 canvas{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;display:block;background:#000}
+#caption {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 1rem;
+  bottom: max(1rem, 4dvh, env(safe-area-inset-bottom));
+  margin: 0;
+  padding-inline: 1rem;
+  color: #e9a39b;
+  font: 600 clamp(0.875rem, 2.5vmin, 1.125rem)/1.4 ui-monospace, monospace;
+  text-align: center;
+  pointer-events: none;
+}
+#caption:not([hidden]) { animation: caption-in 900ms ease-out; }
+@keyframes caption-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #caption:not([hidden]) { animation: none; }
+}
 </style>
 </head>
 <body>
 <canvas id="c" aria-label="Анимированная роза из символов"></canvas>
+<p id="caption" hidden>Спасибо Зейнаб 🌹</p>
 <script>
 {
 'use strict';
@@ -475,6 +496,7 @@ const SX = 2, SY = 4, SVN = SX * SY;
 const FONT = '"Consolas","Menlo","SF Mono","DejaVu Sans Mono","Liberation Mono","Roboto Mono","Courier New",monospace';
 
 const canvas = document.getElementById('c');
+const caption = document.getElementById('caption');
 const ctx = canvas.getContext('2d', { alpha: false });
 const R = { W: 0, H: 0, quality: 1 };
 let glyphChars, gIndex, atlas, rampList, rampLut, matchGlyph, matchVec;
@@ -730,9 +752,12 @@ function frame(now) {
   if (now - last < 14) return;        // about 60 fps, even on 120 Hz screens
   last = now;
   resize();
+  const t = (now - t0) / 1000;
   const s0 = performance.now();
-  render((now - t0) / 1000);
+  render(t);
   const ms = performance.now() - s0;
+  const hideCaption = t < T_BLOOM1;
+  if (caption.hidden !== hideCaption) caption.hidden = hideCaption;
   window.__rose.ms = (window.__rose.ms || ms) * 0.9 + ms * 0.1; window.__rose.grid = cols + 'x' + rows + ' ch' + ch + ' q' + R.quality.toFixed(2);
   // a slow device gets slightly larger characters rather than a stutter
   slowFrames = ms > 24 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
