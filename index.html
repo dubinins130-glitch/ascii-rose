@@ -84,7 +84,7 @@ let PR = 0, PH = 0;
 
 // ---------------------------------------------------------------- scene
 const NP = 23, NS = 5, STEM_N = 48;
-const T_STEM0 = 2.0, T_STEM1 = 5.0, T_BUD0 = 4.4, T_BUD1 = 7.0, T_BLOOM0 = 7.0, T_BLOOM1 = 13.2, T_TEXT0 = 12.0;
+const T_STEM0 = 2.0, T_STEM1 = 5.0, T_BUD0 = 4.4, T_BUD1 = 7.0, T_BLOOM0 = 7.0, T_BLOOM1 = 13.2;
 const S = {
   petals: [], sepals: [], front: [], back: [],
   stX: new Float64Array(STEM_N + 1), stY: new Float64Array(STEM_N + 1),
@@ -469,8 +469,6 @@ function evalField(sx, sy) {
 }
 
 // ---------------------------------------------------------------- renderer
-const CAPTION = 'Хотел подарить цветы, но я немного ебанутый';
-const CAPTION_LINES = ['Хотел подарить цветы,', 'но я немного ебанутый'];
 const RAMP = '.:-~ricszxvunoaejJCLYTUZXQOKHAEDPRBNMW8';
 const SHAPES = "|/\\()_-',.`:;LJ7";
 const SX = 2, SY = 4, SVN = SX * SY;
@@ -485,7 +483,7 @@ let sLum, sR, sG, sB, sSh, sId, sRank, birth, img, pix;
 let frameNo = 0, fullNext = true;
 
 function buildAtlas() {
-  const set = new Set((RAMP + SHAPES + CAPTION + ' ').split(''));
+  const set = new Set((RAMP + SHAPES + ' ').split(''));
   glyphChars = Array.from(set);
   gIndex = new Map(); glyphChars.forEach((c, i) => gIndex.set(c, i));
   const oc = document.createElement('canvas'), g = oc.getContext('2d', { willReadFrequently: true });
@@ -609,9 +607,6 @@ function render(t) {
   pix.fill(0xFF000000);
   const tf = Math.floor(t * 14);
   const introSpark = smooth(0.5, 2.2, t) * (1 - smooth(5.0, 9.0, t));
-  const lines = cols >= CAPTION.length + 4 ? [CAPTION] : CAPTION_LINES;
-  let capRow = Math.round(((H * 0.5 + 0.875 * unit) - offY) / ch);
-  if (capRow > rows - 1 - lines.length) capRow = rows - 1 - lines.length;
   const nMatch = matchGlyph.length;
   // after a resize (rotation, address bar) the rose just stays; only the first build materialises
   const quiet = quietBirth && t > 3; quietBirth = false;
@@ -706,20 +701,6 @@ function render(t) {
             glyph = rampList[10 + ((rnd(ci, slot, 8) * (rampList.length - 11)) | 0)];
             const c = (0.25 + 0.55 * near) * a * (0.6 + 0.4 * rnd(ci, slot, 12));
             if (rnd(ci, slot, 13) < 0.25) { r = c * 0.25; g = c * 0.55; b = c * 0.25; } else { r = c; g = c * 0.10; b = c * 0.14; }
-          }
-        }
-      }
-      // caption
-      const li = cy - capRow;
-      if (li >= 0 && li < lines.length && t > T_TEXT0) {
-        const line = lines[li], k = cx - (((cols - line.length) / 2) | 0);
-        if (k >= 0 && k < line.length && line[k] !== ' ') {
-          const kg = k + (li > 0 ? lines[0].length + 1 : 0);
-          const a = (t - (T_TEXT0 + kg * 0.06 + rnd(kg, 1, 99) * 0.35)) / 0.9;
-          if (a > 0) {
-            const v = smooth(0, 1, a) * (0.88 + 0.12 * Math.sin(t * 0.6 + kg * 0.15));
-            glyph = a < 0.55 && rnd(kg, tf, 77) > a * 1.6 ? rampList[12 + ((rnd(kg, tf, 78) * (rampList.length - 13)) | 0)] : gIndex.get(line[k]);
-            r = 0.92 * v; g = 0.62 * v; b = 0.60 * v;
           }
         }
       }
